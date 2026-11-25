@@ -1,0 +1,6 @@
+{
+  "name": "NiftyPulse — NSE F&O & Nifty 500 Screener",
+  "description": "Live NSE F&O and Nifty 500 technical screener powered by NSE Bhavcopy and CM Market Live MCP feeds, featuring weighted symbol strength analysis, industry benchmark comparisons, sectoral rotation, and direct TradingView chart links.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
