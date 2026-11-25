@@ -36,7 +36,10 @@ export function formatTurnoverCr(cr: number): string {
   return `₹${cr.toFixed(1)} Cr`;
 }
 
-export function getTradingViewUrl(symbol: string): string {
-  const clean = encodeURIComponent(symbol.trim().toUpperCase());
-  return `https://www.tradingview.com/chart/?symbol=NSE%3A${clean}`;
+export function getTradingViewUrl(symbol: string, interval?: '5' | '60' | 'D' | 'W'): string {
+  const raw = symbol.trim().toUpperCase();
+  const tvSym = raw === 'BAJAJ-AUTO' ? 'BAJAJ_AUTO' : raw === 'NAM-INDIA' ? 'NAM_INDIA' : raw;
+  const clean = encodeURIComponent(tvSym);
+  const base = `https://www.tradingview.com/chart/?symbol=NSE%3A${clean}`;
+  return interval ? `${base}&interval=${interval}` : base;
 }

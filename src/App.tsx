@@ -5,6 +5,7 @@ import { ScreenerView } from './components/ScreenerView';
 import { SectorRotationView } from './components/SectorRotationView';
 import { StrengthOverviewView } from './components/StrengthOverviewView';
 import { SymbolLink } from './components/SymbolLink';
+import { XtsiDashboardView } from './components/XtsiDashboardView';
 import type {
   DashboardPayload,
   ScreenerCategoryId,
@@ -13,7 +14,7 @@ import type {
 } from './types/market';
 import { SCREENER_BY_ID } from './utils/screenerMeta';
 
-type MainTab = 'overview' | 'technical' | 'thematic' | 'sectors';
+type MainTab = 'overview' | 'xtsi' | 'technical' | 'thematic' | 'sectors';
 
 interface SearchResultItem {
   symbol: string;
@@ -64,7 +65,12 @@ export default function App() {
         throw new Error(body.error || `HTTP ${res.status}`);
       }
       const data: DashboardPayload = await res.json();
-      setDashboard(data);
+      setDashboard((prev) => {
+        if (prev && prev.stocks.length > 0 && (!data.stocks || data.stocks.length === 0)) {
+          return prev;
+        }
+        return data;
+      });
       setError(null);
       return data;
     } catch (err: any) {
@@ -205,11 +211,12 @@ export default function App() {
             NiftyPulse
           </button>
 
-          {/* Zone 2: 4 concise single-line text navigation links */}
+          {/* Zone 2: 5 concise single-line text navigation links */}
           <nav className="hidden md:flex items-center gap-6 text-sm font-medium">
             {(
               [
                 ['overview', 'Strength & Movers'],
+                ['xtsi', 'X TSI Scanner'],
                 ['technical', 'Technical Screener'],
                 ['thematic', 'Thematic & Horizon'],
                 ['sectors', 'Sector Rotation'],
@@ -252,7 +259,8 @@ export default function App() {
       <div className="md:hidden border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-[#111827] px-4 py-2 flex items-center gap-1.5 overflow-x-auto">
         {(
           [
-            ['overview', 'Strength & Movers'],
+            ['overview', 'Strength'],
+            ['xtsi', 'X TSI'],
             ['technical', 'Technical'],
             ['thematic', 'Thematic'],
             ['sectors', 'Sectors'],
@@ -340,10 +348,11 @@ export default function App() {
           {/* Right Toolbar Controls */}
           <div className="flex flex-wrap items-center gap-3">
             {/* Universe Filter */}
-            <div className="flex items-center gap-0.5 p-0.5 bg-slate-100 dark:bg-slate-800/90 rounded-md">
+            <div className="flex items-center gap-0.5 p-0.5 bg-slate-100 dark:bg-slate-800/90 rounded-md overflow-x-auto max-w-full">
               {(
                 [
                   ['all', 'All NSE'],
+                  ['personal', 'Personal (143)'],
                   ['fno', 'Nifty F&O'],
                   ['nifty50', 'Nifty 50'],
                   ['nifty500', 'Nifty 500'],
@@ -432,11 +441,18 @@ export default function App() {
               />
             )}
 
+            {activeTab === 'xtsi' && (
+              <XtsiDashboardView
+                watchlist={universeFilter === 'all' ? 'personal' : universeFilter}
+                onWatchlistChange={(wl) => setUniverseFilter(wl)}
+                onSelectSymbolForStrength={handleSelectSymbolForDashboard}
+              />
+            )}
+
             {activeTab === 'technical' && (
               <ScreenerView
                 mode="technical"
                 stocks={dashboard.stocks}
-                categoryCounts={dashboard.categoryCounts}
                 activeCategory={screenerCategory}
                 onCategoryChange={setScreenerCategory}
                 universeFilter={universeFilter}
@@ -448,7 +464,6 @@ export default function App() {
               <ScreenerView
                 mode="thematic"
                 stocks={dashboard.stocks}
-                categoryCounts={dashboard.categoryCounts}
                 activeCategory={thematicCategory}
                 onCategoryChange={setThematicCategory}
                 universeFilter={universeFilter}

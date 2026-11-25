@@ -14,12 +14,21 @@ import {
   evaluateScreenerSignals,
 } from './technicals.ts';
 import {
+  FNO_WATCHLIST_SET,
+  PERSONAL_WATCHLIST_143,
+  PERSONAL_WATCHLIST_SET,
+} from '../src/data/watchlists.ts';
+import {
   DEFAULT_BENCHMARK,
   SECTOR_BENCHMARKS,
   UNIVERSE,
   UNIVERSE_BY_SYMBOL,
   getSectorBenchmark,
 } from './universe.ts';
+import {
+  fetchYahooNseIndices,
+  fetchYahooNseStock,
+} from './yahooFallback.ts';
 
 interface CachedHistory {
   history: OhlcPoint[];
@@ -53,6 +62,7 @@ const HISTORY_TTL_MS = 20 * 60 * 1000; // 20 minutes (Bhavcopy EOD updates daily
 const LIVE_TTL_MS = 55 * 1000; // 55 seconds (CMMKT refreshes every 1 min)
 
 const historyCache = new Map<string, CachedHistory>();
+const lastKnownSnapshots = new Map<string, LiveQuoteSnapshot>();
 let lastDashboard: DashboardPayload | null = null;
 let lastLiveFetchAt = 0;
 let liveRefreshPromise: Promise<DashboardPayload> | null = null;
@@ -153,17 +163,36 @@ async function fetchSymbolHistory(symbol: string): Promise<CachedHistory | null>
     const fiftyTwoWeekLow = parseNumber(hi52Res?.['52w_low'], parseNumber(histRes?.summary?.period_low));
     const avgVolume30d = parseNumber(histRes?.summary?.avg_daily_vol);
 
-    const entry: CachedHistory = {
-      history,
-      sma200,
-      fiftyTwoWeekHigh,
-      fiftyTwoWeekLow,
-      multiYearHigh: Math.max(fiftyTwoWeekHigh, periodHigh),
-      avgVolume30d,
-      fetchedAt: Date.now(),
-    };
-    historyCache.set(symbol, entry);
-    return entry;
+    if (history.length >= 5) {
+      const entry: CachedHistory = {
+        history,
+        sma200,
+        fiftyTwoWeekHigh,
+        fiftyTwoWeekLow,
+        multiYearHigh: Math.max(fiftyTwoWeekHigh, periodHigh),
+        avgVolume30d,
+        fetchedAt: Date.now(),
+      };
+      historyCache.set(symbol, entry);
+      return entry;
+    }
+
+    // Fallback to Yahoo Finance 1-year daily OHLCV if NSE Bhavcopy MCP returned 403/empty
+    const yf = await fetchYahooNseStock(symbol).catch(() => null);
+    if (yf && yf.history.length >= 5) {
+      const entry: CachedHistory = {
+        history: yf.history,
+        sma200: yf.sma200,
+        fiftyTwoWeekHigh: yf.fiftyTwoWeekHigh,
+        fiftyTwoWeekLow: yf.fiftyTwoWeekLow,
+        multiYearHigh: yf.fiftyTwoWeekHigh,
+        avgVolume30d: yf.avgVolume30d,
+        fetchedAt: Date.now(),
+      };
+      historyCache.set(symbol, entry);
+      return entry;
+    }
+    return null;
   } catch {
     return null;
   }
@@ -291,7 +320,8 @@ function buildStockRecord(
     name: meta?.name || symbol,
     sector,
     capTier: meta?.capTier || (fundamentals.marketCapCr >= 75000 ? 'Large Cap' : fundamentals.marketCapCr >= 18000 ? 'Mid Cap' : 'Small Cap'),
-    isFnO: meta?.isFnO || false,
+    isFnO: Boolean(meta?.isFnO) || FNO_WATCHLIST_SET.has(symbol),
+    isPersonal: PERSONAL_WATCHLIST_SET.has(symbol),
     isNifty50: meta?.isNifty50 || false,
     isNifty500: meta?.isNifty500 ?? true,
     ltp: round2(live.ltp),
@@ -370,7 +400,12 @@ export async function getDashboardData(forceRefresh = false): Promise<DashboardP
   }
 
   liveRefreshPromise = (async () => {
-    const allUniverseSymbols = UNIVERSE.map((u) => u.symbol);
+    const personalEquities = PERSONAL_WATCHLIST_143.map((s) =>
+      s === 'BAJAJ_AUTO' ? 'BAJAJ-AUTO' : s === 'NAM_INDIA' ? 'NAM-INDIA' : s
+    ).filter((s) => !s.endsWith('1!') && !['NIFTY', 'BANKNIFTY', 'CNXFINANCE', 'NIFTY_MID_SELECT'].includes(s));
+    const allUniverseSymbols = Array.from(
+      new Set<string>([...UNIVERSE.map((u) => u.symbol), ...personalEquities])
+    );
 
     // Chunk universe into 50-symbol groups for get_bulk_quote
     const chunks: string[][] = [];
@@ -439,6 +474,17 @@ export async function getDashboardData(forceRefresh = false): Promise<DashboardP
     const ret1M = extractReturnMap(idx1MRes);
     const ret3M = extractReturnMap(idx3MRes);
 
+    // Seamless hybrid fallback: if NSE MCP indices returned 403/empty, hydrate live NSE indices from Yahoo Finance v8
+    if (indexMap.size < 5) {
+      const yfIndices = await fetchYahooNseIndices().catch(() => new Map());
+      for (const [k, snap] of yfIndices.entries()) {
+        if (!indexMap.has(k)) indexMap.set(k, snap.quote);
+        if (!ret1W.has(k)) ret1W.set(k, snap.return1W);
+        if (!ret1M.has(k)) ret1M.set(k, snap.return1M);
+        if (!ret3M.has(k)) ret3M.set(k, snap.return3M);
+      }
+    }
+
     const sectorReturns = new Map<string, { d1: number; m1: number }>();
     for (const [key, q] of indexMap.entries()) {
       sectorReturns.set(key, {
@@ -448,7 +494,8 @@ export async function getDashboardData(forceRefresh = false): Promise<DashboardP
     }
 
     // 2. Merge live stock quotes from CMMKT equity watch + gainers/losers + Bhavcopy bulk quotes
-    const liveSnapshots = new Map<string, LiveQuoteSnapshot>();
+    // Seed from lastKnownSnapshots so transient MCP hiccups NEVER cause symbols to vanish
+    const liveSnapshots = new Map<string, LiveQuoteSnapshot>(lastKnownSnapshots);
 
     // First populate from bulk quotes (covers our entire 155-symbol Nifty F&O + Nifty 500 universe!)
     for (const bRes of bulkResults) {
@@ -534,16 +581,57 @@ export async function getDashboardData(forceRefresh = false): Promise<DashboardP
       }
     }
 
+    // Seamless hybrid fallback: if NSE MCP returned 403/empty for universe symbols, hydrate directly from Yahoo Finance v8
+    const missingUniverse = allUniverseSymbols.filter((sym) => !liveSnapshots.has(sym));
+    if (missingUniverse.length > 0) {
+      await runWithConcurrency(missingUniverse, 12, async (sym) => {
+        const yf = await fetchYahooNseStock(sym).catch(() => null);
+        if (!yf) return;
+        liveSnapshots.set(sym, {
+          symbol: sym,
+          ltp: yf.ltp,
+          open: yf.open,
+          high: yf.high,
+          low: yf.low,
+          prevClose: yf.prevClose,
+          change: yf.change,
+          perChange: yf.perChange,
+          perChange30d: yf.perChange30d,
+          volume: yf.volume,
+          turnoverCr: yf.turnoverCr,
+          fiftyTwoWeekHigh: yf.fiftyTwoWeekHigh,
+          fiftyTwoWeekLow: yf.fiftyTwoWeekLow,
+          latestTimestamp: yf.latestTimestamp,
+        });
+        historyCache.set(sym, {
+          history: yf.history,
+          sma200: yf.sma200,
+          fiftyTwoWeekHigh: yf.fiftyTwoWeekHigh,
+          fiftyTwoWeekLow: yf.fiftyTwoWeekLow,
+          multiYearHigh: yf.fiftyTwoWeekHigh,
+          avgVolume30d: yf.avgVolume30d,
+          fetchedAt: Date.now(),
+        });
+      });
+    }
+
     // 3. Kick off background historical Bhavcopy enrichment (non-blocking if first run, instant once cached)
     const activeSymbols = Array.from(liveSnapshots.keys());
     triggerBackgroundEnrichment(activeSymbols);
 
-    // If very first request and zero histories cached yet, eagerly warm the top 30 flagship symbols (takes ~400ms!)
+    // If very first request and zero histories cached yet, eagerly warm the top 30 flagship symbols
     if (historyCache.size < 15) {
       const priority = activeSymbols.slice(0, 30);
-      await runWithConcurrency(priority, 10, async (sym) => {
+      await runWithConcurrency(priority, 8, async (sym) => {
         await fetchSymbolHistory(sym);
       });
+    }
+
+    // Persist all valid snapshots into lastKnownSnapshots
+    for (const [sym, snap] of liveSnapshots.entries()) {
+      if (snap.ltp > 0) {
+        lastKnownSnapshots.set(sym, snap);
+      }
     }
 
     // 4. Compute full StockRecords with technicals, signals, and weighted strength
@@ -552,6 +640,14 @@ export async function getDashboardData(forceRefresh = false): Promise<DashboardP
       if (snap.ltp <= 0) continue;
       const hist = historyCache.get(sym) || null;
       stocks.push(buildStockRecord(sym, snap, hist, sectorReturns));
+    }
+
+    // Guard: never overwrite a populated dashboard with an empty or severely degraded transient response
+    if (lastDashboard && stocks.length < Math.max(20, Math.floor(lastDashboard.stocks.length * 0.5))) {
+      console.warn(
+        `[MarketService] Skipped degraded refresh (${stocks.length} stocks vs ${lastDashboard.stocks.length} cached)`
+      );
+      return lastDashboard;
     }
 
     // Sort main screener list by weighted strength descending
@@ -646,6 +742,11 @@ export async function getDashboardData(forceRefresh = false): Promise<DashboardP
       }
     }
 
+    const advCount = stocks.filter((s) => s.perChange > 0).length;
+    const decCount = stocks.filter((s) => s.perChange < 0).length;
+    const unchCount = Math.max(0, stocks.length - advCount - decCount);
+    const totalVol = stocks.reduce((acc, s) => acc + s.volume, 0);
+
     const breadth: MarketBreadth | null = breadthRes
       ? {
           date: breadthRes.date,
@@ -656,13 +757,24 @@ export async function getDashboardData(forceRefresh = false): Promise<DashboardP
           adRatio: parseNumber(breadthRes.ad_ratio),
           totalVolume: parseNumber(breadthRes.total_volume),
         }
-      : null;
+      : stocks.length > 0
+        ? {
+            date: stocks[0]?.latestTimestamp || new Date().toISOString().slice(0, 10),
+            totalStocks: stocks.length,
+            advances: advCount,
+            declines: decCount,
+            unchanged: unchCount,
+            adRatio: decCount > 0 ? round2(advCount / decCount) : advCount,
+            totalVolume: totalVol,
+          }
+        : null;
 
     const enrichedCount = stocks.filter((s) => historyCache.has(s.symbol)).length;
+    const niftyTime = indexMap.get('NIFTY 50')?.timeVal;
 
     const payload: DashboardPayload = {
       updatedAt: new Date().toISOString(),
-      nseTimestamp: liveIndicesRes?.nseTimestamp || breadthRes?.date || new Date().toISOString(),
+      nseTimestamp: liveIndicesRes?.nseTimestamp || niftyTime || breadthRes?.date || new Date().toISOString().slice(0, 10),
       enrichmentComplete: enrichmentCompletedOnce && enrichedCount >= Math.min(stocks.length, 80),
       enrichedCount,
       totalUniverse: stocks.length,
@@ -681,8 +793,10 @@ export async function getDashboardData(forceRefresh = false): Promise<DashboardP
       categoryCounts,
     };
 
-    lastDashboard = payload;
-    lastLiveFetchAt = Date.now();
+    if (stocks.length > 0) {
+      lastDashboard = payload;
+      lastLiveFetchAt = Date.now();
+    }
     return payload;
   })().finally(() => {
     liveRefreshPromise = null;
@@ -711,19 +825,37 @@ export async function getStockDeepDetail(rawSymbol: string): Promise<StockRecord
   const existing = dashboard.stocks.find((s) => s.symbol === symbol);
   const s = liveQuoteRes?.stock;
 
+  // Seamless Yahoo Finance fallback for any of the 3,500+ NSE stocks if NSE MCP returned 403
+  let yfFallback = null;
   if (!s && !existing && (!hist || !hist.history.length)) {
-    return null;
+    yfFallback = await fetchYahooNseStock(symbol).catch(() => null);
+    if (!yfFallback) return null;
   }
 
-  const lastBar = hist?.history[hist.history.length - 1];
-  const prevBar = hist?.history[Math.max(0, (hist?.history.length || 1) - 2)];
+  const effectiveHist: CachedHistory | null =
+    hist && hist.history.length > 0
+      ? hist
+      : yfFallback
+        ? {
+            history: yfFallback.history,
+            sma200: yfFallback.sma200,
+            fiftyTwoWeekHigh: yfFallback.fiftyTwoWeekHigh,
+            fiftyTwoWeekLow: yfFallback.fiftyTwoWeekLow,
+            multiYearHigh: yfFallback.fiftyTwoWeekHigh,
+            avgVolume30d: yfFallback.avgVolume30d,
+            fetchedAt: Date.now(),
+          }
+        : null;
 
-  const ltp = parseNumber(s?.lastTradedPrice, existing?.ltp || lastBar?.close || 0);
-  const prevClose = parseNumber(s?.preClosePrice, existing?.prevClose || prevBar?.close || ltp);
-  const open = parseNumber(s?.openPrice, existing?.open || lastBar?.open || ltp);
-  const high = parseNumber(s?.highPrice, existing?.high || lastBar?.high || ltp);
-  const low = parseNumber(s?.lowPrice, existing?.low || lastBar?.low || ltp);
-  const volume = parseNumber(s?.volume, existing?.volume || lastBar?.volume || 0);
+  const lastBar = effectiveHist?.history[effectiveHist.history.length - 1];
+  const prevBar = effectiveHist?.history[Math.max(0, (effectiveHist?.history.length || 1) - 2)];
+
+  const ltp = parseNumber(s?.lastTradedPrice, existing?.ltp || yfFallback?.ltp || lastBar?.close || 0);
+  const prevClose = parseNumber(s?.preClosePrice, existing?.prevClose || yfFallback?.prevClose || prevBar?.close || ltp);
+  const open = parseNumber(s?.openPrice, existing?.open || yfFallback?.open || lastBar?.open || ltp);
+  const high = parseNumber(s?.highPrice, existing?.high || yfFallback?.high || lastBar?.high || ltp);
+  const low = parseNumber(s?.lowPrice, existing?.low || yfFallback?.low || lastBar?.low || ltp);
+  const volume = parseNumber(s?.volume, existing?.volume || yfFallback?.volume || lastBar?.volume || 0);
   const change = parseNumber(s?.change, round2(ltp - prevClose));
   const perChange = parseNumber(s?.perChange, prevClose > 0 ? round2(((ltp - prevClose) / prevClose) * 100) : 0);
 
@@ -736,19 +868,19 @@ export async function getStockDeepDetail(rawSymbol: string): Promise<StockRecord
     prevClose,
     change,
     perChange,
-    perChange30d: parseNumber(s?.perChange30d, existing?.perChange30d || 0),
+    perChange30d: parseNumber(s?.perChange30d, existing?.perChange30d || yfFallback?.perChange30d || 0),
     volume,
-    turnoverCr: parseNumber(s?.value, existing?.turnoverCr || round2((volume * ltp) / 1e7)),
-    fiftyTwoWeekHigh: parseNumber(s?.fiftyTwoWeekHigh, Math.max(hist?.fiftyTwoWeekHigh || 0, existing?.fiftyTwoWeekHigh || 0, ltp)),
-    fiftyTwoWeekLow: parseNumber(s?.fiftyTwoWeekLow, hist?.fiftyTwoWeekLow || existing?.fiftyTwoWeekLow || ltp),
-    latestTimestamp: s?.latestTimestamp || existing?.latestTimestamp || new Date().toISOString(),
+    turnoverCr: parseNumber(s?.value, existing?.turnoverCr || yfFallback?.turnoverCr || round2((volume * ltp) / 1e7)),
+    fiftyTwoWeekHigh: parseNumber(s?.fiftyTwoWeekHigh, Math.max(effectiveHist?.fiftyTwoWeekHigh || 0, existing?.fiftyTwoWeekHigh || 0, ltp)),
+    fiftyTwoWeekLow: parseNumber(s?.fiftyTwoWeekLow, effectiveHist?.fiftyTwoWeekLow || existing?.fiftyTwoWeekLow || ltp),
+    latestTimestamp: s?.latestTimestamp || existing?.latestTimestamp || yfFallback?.latestTimestamp || new Date().toISOString().slice(0, 10),
     corporateAction: existing?.corporateAction,
   };
 
-  const enrichedHist: CachedHistory | null = hist
+  const enrichedHist: CachedHistory | null = effectiveHist
     ? {
-        ...hist,
-        avgVolume30d: parseNumber(volRes?.avg_volume, hist.avgVolume30d),
+        ...effectiveHist,
+        avgVolume30d: parseNumber(volRes?.avg_volume, effectiveHist.avgVolume30d),
       }
     : null;
 

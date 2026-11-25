@@ -1,0 +1,613 @@
+//@version=6
+indicator(title="2x TSI WaveTrend", shorttitle="2x_TSI_WT", overlay=false)
+
+// =========================================================================
+// NEW: EXTRA TSI TOGGLES (FIRST IN DASHBOARD)
+// =========================================================================
+
+show5mTsiOn1m  = input.bool(true,  title="Show 5m TSI on 1m Chart", group="Specific Timeframe TSI Display")
+show15mTsiOn1m = input.bool(false, title="Show 15m TSI on 1m Chart", group="Specific Timeframe TSI Display")
+show15mTsiOn5m = input.bool(false,  title="Show 15m TSI on 5m Chart", group="Specific Timeframe TSI Display")
+
+// =========================================================================
+// 1. ORIGINAL CODE (UNTOUCHED LOGIC, UPDATED PLOTTING)
+// =========================================================================
+
+// --- Inputs ---
+n1 = input.int(7, "Channel Length", group="Original Core")
+n2 = input.int(18, "Average Length (EMA / ALMA)", group="Original Core")
+smoothType = input.string("EMA", title="Smoothing Profile", options=["EMA", "ALMA"], group="Original Core")
+obLevel1 = input.int(60, "Over Bought Level 1", group="Original Core")
+obLevel2 = input.int(53, "Over Bought Level 2", group="Original Core")
+osLevel1 = input.int(-60, "Over Sold Level 1", group="Original Core")
+osLevel2 = input.int(-53, "Over Sold Level 2", group="Original Core")
+
+// --- Toggles for Visuals ---
+showLabels    = input.bool(true, title="Show Buy/Sell Labels on Crosses", group="Original Core")
+showRibbon    = input.bool(true, title="Use Ribbon Display (Fill instead of Lines)", group="Original Core")
+showHtf1      = input.bool(true, title="Show HTF 1 Ribbon", group="Original Core")
+showHtf2      = input.bool(true, title="Show HTF 2 Ribbon", group="Original Core")
+
+// =========================================================================
+// NEW: TB & TS SETTINGS
+// =========================================================================
+tbThreshold = input.float(-25.0, title="TB Signal Threshold (WT <)", group="TB / TS Settings")
+tsThreshold = input.float(25.0,  title="TS Signal Threshold (WT >)", group="TB / TS Settings")
+
+// --- Core Calculation Function ---
+wt_calc(chanLen, avgLen, sType) =>
+    ap = hlc3 
+    esa = ta.ema(ap, chanLen)
+    d = ta.ema(math.abs(ap - esa), chanLen)
+    ci = (ap - esa) / (0.015 * d)
+    
+    // Toggle between standard EMA and ALMA smoothing
+    wt1 = sType == "ALMA" ? ta.alma(ci, avgLen, 0.85, 6) : ta.ema(ci, avgLen)
+    wt2 = ta.sma(wt1, 4)
+    [wt1, wt2]
+
+// --- Current Timeframe Calculation ---
+[wt1, wt2] = wt_calc(n1, n2, smoothType)
+
+// --- Dynamic HTF Logic ---
+get_htf() =>
+    string htf = "60" // Default to 1 Hour
+    if timeframe.isintraday
+        if timeframe.multiplier < 15
+            htf := "60"     // Below 15 mins -> 1Hr TF
+        else if timeframe.multiplier <= 120
+            htf := "1D"     // 15 Mins to 2Hr -> 1 Day TF
+        else
+            htf := "1W"     // 3Hrs to < 1 Day -> 1 Week TF
+    else if timeframe.isdaily
+        htf := "1W"         // 1 Day -> 1 Week TF
+    else if timeframe.isweekly
+        htf := "1M"         // 1 Week -> 1 Month TF
+    else
+        htf := timeframe.period
+    htf
+
+// --- Dynamic HHTF Logic (Higher-Higher Timeframe for 2x/4x validation) ---
+get_hhtf() =>
+    string hhtf = "1D" 
+    if timeframe.isintraday
+        if timeframe.multiplier < 15
+            hhtf := "1D"     // CTF < 15m -> HTF 1H -> HHTF 1D
+        else if timeframe.multiplier <= 120
+            hhtf := "1W"     // CTF 15m-2H -> HTF 1D -> HHTF 1W
+        else
+            hhtf := "1M"     // CTF 3H+ -> HTF 1W -> HHTF 1M
+    else if timeframe.isdaily
+        hhtf := "1M"         // CTF 1D -> HTF 1W -> HHTF 1M
+    else if timeframe.isweekly
+        hhtf := "1M"         // CTF 1W -> HTF 1M -> HHTF 1M
+    else
+        hhtf := "1M"
+    hhtf
+
+htf_tf = get_htf()
+hhtf_tf = get_hhtf()
+
+// --- Higher Timeframe Calculation ---
+// -> Added lookahead_on to eliminate the HTF delay and perfectly align the levels
+[htf_wt1, htf_wt2] = request.security(syminfo.tickerid, htf_tf, wt_calc(n1, n2, smoothType), lookahead = barmerge.lookahead_on)
+[hhtf_wt1, hhtf_wt2] = request.security(syminfo.tickerid, hhtf_tf, wt_calc(n1, n2, smoothType), lookahead = barmerge.lookahead_on)
+
+// --- Plotting OB/OS Levels (Optimized to hline to save 5 plots) ---
+hline(0, color=color.gray, title="Zero Line", linestyle=hline.style_solid)
+hline(obLevel1, color=color.red, title="OB Level 1", linestyle=hline.style_solid)
+hline(osLevel1, color=color.green, title="OS Level 1", linestyle=hline.style_solid)
+hline(obLevel2, color=color.red, title="OB Level 2", linestyle=hline.style_solid)
+hline(osLevel2, color=color.green, title="OS Level 2", linestyle=hline.style_solid)
+
+// --- Plotting Current Timeframe ---
+// Uses display to hide the line from the chart when ribbon is true, keeping the scale color dynamic
+disp_ctf = showRibbon ? (display.price_scale + display.data_window) : display.all
+p_wt1 = plot(wt1, color=showRibbon ? (wt1 > wt2 ? color.aqua : color.red) : color.green, title="WT1 (Current TF)", display=disp_ctf)
+p_wt2 = plot(wt2, color=showRibbon ? (wt1 > wt2 ? color.aqua : color.red) : color.red,   title="WT2 (Current TF)", display=disp_ctf)
+
+// --- Ribbon Fill Current Timeframe ---
+fill(p_wt1, p_wt2, color=showRibbon ? (wt1 > wt2 ? color.new(color.aqua, 0) : color.new(color.red, 0)) : na, title="CTF Ribbon Fill")
+
+// --- Cross Logic ---
+bool cross_bull = ta.crossover(wt1, wt2)
+bool cross_bear = ta.crossunder(wt1, wt2)
+bool cross_any  = ta.cross(wt1, wt2)
+
+bool htf_cross_bull = ta.crossover(htf_wt1, htf_wt2)
+bool htf_cross_bear = ta.crossunder(htf_wt1, htf_wt2)
+
+// --- HTF Active State Logic ---
+bool htf_is_2xb = htf_cross_bull and (hhtf_wt1 > hhtf_wt2)
+bool htf_is_normal_b = htf_cross_bull and not htf_is_2xb
+
+bool htf_is_2xs = htf_cross_bear and (hhtf_wt1 < hhtf_wt2)
+bool htf_is_normal_s = htf_cross_bear and not htf_is_2xs
+
+// --- Filtered $HB / $HS Logic ---
+bool htf_is_filtered_b = htf_is_normal_b and (htf_wt2 <= -28)
+bool htf_is_regular_b  = htf_is_normal_b and not htf_is_filtered_b
+
+bool htf_is_filtered_s = htf_is_normal_s and (htf_wt2 >= 28)
+bool htf_is_regular_s  = htf_is_normal_s and not htf_is_filtered_s
+
+// Track the HTF state for the entire duration
+var string htf_active_state = "NONE"
+if htf_cross_bull
+    htf_active_state := htf_is_2xb ? "H2XB" : (htf_is_filtered_b ? "$HB" : "HB")
+else if htf_cross_bear
+    htf_active_state := htf_is_2xs ? "H2XS" : (htf_is_filtered_s ? "$HS" : "HS")
+
+// --- 2x / 4x Alignment Logic ---
+// 2xB / 4xB: CTF crosses UP while HTF is ALREADY UP
+bool base_is_2xb = cross_bull and (htf_wt1 > htf_wt2)
+bool is_4xb = base_is_2xb and (htf_active_state == "H2XB")
+bool is_2xb = base_is_2xb and not is_4xb
+bool is_normal_b = cross_bull and not base_is_2xb
+
+// 2xS / 4xS: CTF crosses DOWN while HTF is ALREADY DOWN
+bool base_is_2xs = cross_bear and (htf_wt1 < htf_wt2)
+bool is_4xs = base_is_2xs and (htf_active_state == "H2XS")
+bool is_2xs = base_is_2xs and not is_4xs
+bool is_normal_s = cross_bear and not base_is_2xs
+
+// --- Dollar Override Logic ($2XB, $2XS, $4XB, $4XS) ---
+bool is_dollar_2xb = is_2xb and (htf_active_state == "$HB")
+bool is_dollar_4xb = is_4xb and (htf_active_state == "$HB") // Captures any $4XB edge cases
+bool is_dollar_2xs = is_2xs and (htf_active_state == "$HS")
+bool is_dollar_4xs = is_4xs and (htf_active_state == "$HS")
+
+// Print regular signals only if they aren't dollar overrides
+bool print_2xb = is_2xb and not is_dollar_2xb
+bool print_4xb = is_4xb and not is_dollar_4xb
+bool print_2xs = is_2xs and not is_dollar_2xs
+bool print_4xs = is_4xs and not is_dollar_4xs
+
+// =========================================================================
+// NEW: SYNC LOGIC (3x Alignment Filtered by HTF1 Cycle + WT Level)
+// =========================================================================
+maxSyncSignals = input.int(3, title="Max SYNC Signals per Trend Cycle", minval=1, group="SYNC Settings", tooltip="Number of times the SYNC signal can trigger per HTF1 cycle.")
+
+syncBullLevel = input.float(-30.0, title="Bullish SYNC Max Level", group="SYNC Settings")
+syncBearLevel = input.float(30.0, title="Bearish SYNC Min Level", group="SYNC Settings")
+
+var int bull_sync_count = 0
+var int bear_sync_count = 0
+
+// Reset counts dynamically exactly when the HTF1 trend reverses
+if htf_cross_bull
+    bull_sync_count := 0
+if htf_cross_bear
+    bear_sync_count := 0
+
+// State conditions where ALL three timeframes point the same way
+bool sync_bull_state = (wt1 > wt2) and (htf_wt1 > htf_wt2) and (hhtf_wt1 > hhtf_wt2)
+bool sync_bear_state = (wt1 < wt2) and (htf_wt1 < htf_wt2) and (hhtf_wt1 < hhtf_wt2)
+
+// Fire trigger exactly on the bar the alignment begins (WT Level Filter permanently applied)
+bool sync_bull_trigger = sync_bull_state and not sync_bull_state[1] and (wt1 < syncBullLevel)
+bool sync_bear_trigger = sync_bear_state and not sync_bear_state[1] and (wt1 > syncBearLevel)
+
+if sync_bull_trigger
+    bull_sync_count += 1
+if sync_bear_trigger
+    bear_sync_count += 1
+
+// Validate only the first N times per HTF1 cycle
+bool is_sync_bull = sync_bull_trigger and (bull_sync_count <= maxSyncSignals)
+bool is_sync_bear = sync_bear_trigger and (bear_sync_count <= maxSyncSignals)
+bool override_sync = is_sync_bull or is_sync_bear
+
+// =========================================================================
+// NEW: +B2 / +S2 / +B3 / +S3 LOGIC
+// =========================================================================
+
+bool ctf_green = wt1 > wt2
+bool htf1_green = htf_wt1 > htf_wt2
+bool htf2_green = hhtf_wt1 > hhtf_wt2
+bool both_green = ctf_green and htf1_green
+bool is_b2 = both_green and not both_green[1] and (wt1 < -20) and (htf_wt1 < -20)
+bool is_b3 = is_b2 and htf2_green
+
+bool ctf_red = wt1 < wt2
+bool htf1_red = htf_wt1 < htf_wt2
+bool htf2_red = hhtf_wt1 < hhtf_wt2
+bool both_red = ctf_red and htf1_red
+bool is_s2 = both_red and not both_red[1] and (wt1 > 20) and (htf_wt1 > 20)
+bool is_s3 = is_s2 and htf2_red
+
+// =========================================================================
+// NEW: POI (POINT OF INTEREST) LOGIC (Mean Reversion / Divergence)
+// =========================================================================
+
+// Overbought Exhaustion: HTF crossover (bullish indicator momentum) but > 40 implies a BEARISH price reversal.
+bool htf1_poi_bear = ta.crossover(htf_wt1, htf_wt2) and htf_wt1 > 40
+bool htf2_poi_bear = ta.crossover(hhtf_wt1, hhtf_wt2) and hhtf_wt1 > 40
+
+// Oversold Exhaustion: HTF crossunder (bearish indicator momentum) but < -40 implies a BULLISH price reversal.
+bool htf1_poi_bull = ta.crossunder(htf_wt1, hhtf_wt2) and htf_wt1 < -40
+bool htf2_poi_bull = ta.crossunder(hhtf_wt1, hhtf_wt2) and hhtf_wt1 < -40
+
+bool is_poi_bull = htf1_poi_bull or htf2_poi_bull
+bool is_poi_bear = htf1_poi_bear or htf2_poi_bear
+bool is_poi      = is_poi_bull or is_poi_bear
+
+// =========================================================================
+// NEW: HIGH PROBABILITY SETUP (H-UP / H-DN)
+// =========================================================================
+
+bool h_up_cond = (htf_wt1 < -20) and htf1_green and (wt1 < 0)
+bool is_h_up = h_up_cond and not h_up_cond[1]
+
+bool h_dn_cond = (htf_wt1 > 20) and htf1_red and (wt1 > 0)
+bool is_h_dn = h_dn_cond and not h_dn_cond[1]
+
+// =========================================================================
+// TRUE STRENGTH INDEX (TSI) - DYNAMICALLY NORMALIZED TO WT
+// =========================================================================
+
+showTsi     = input.bool(true, title="Show Normalized TSI", group="TSI Settings")
+showHtfTsi  = input.bool(true, title="Show HTF 1 TSI", group="TSI Settings")
+tsiShort    = input.int(13, title="TSI Short Length", group="TSI Settings")
+tsiLong     = input.int(25, title="TSI Long Length", group="TSI Settings")
+tsiSigLen   = input.int(13, title="TSI Signal Length", group="TSI Settings")
+tsiSigLen2  = input.int(9,  title="TSI Secondary Signal Length", group="TSI Settings")
+tsiNormLen  = input.int(100, title="TSI Normalization Lookback", group="TSI Settings", tooltip="Rolling window to dynamically sync the TSI scale to the WaveTrend scale.")
+
+// Calculate Raw TSI and Signal
+raw_tsi = ta.tsi(close, tsiShort, tsiLong) * 100
+raw_tsi_sig = ta.ema(raw_tsi, tsiSigLen)
+raw_tsi_sig2 = ta.ema(raw_tsi, tsiSigLen2) // NEW Secondary Signal
+
+// Dynamic Range Normalization (Anchored at Zero)
+// This scales the TSI to match the exact peak-to-trough range of the WaveTrend
+// while preserving the true zero-line, allowing it to cross OB/OS areas naturally.
+float tsi_max = ta.highest(raw_tsi, tsiNormLen)
+float tsi_min = ta.lowest(raw_tsi, tsiNormLen)
+float wt_max_val = ta.highest(wt1, tsiNormLen)
+float wt_min_val = ta.lowest(wt1, tsiNormLen)
+
+float tsi_range = (tsi_max - tsi_min) == 0 ? 1 : (tsi_max - tsi_min)
+float wt_range  = (wt_max_val - wt_min_val) == 0 ? 1 : (wt_max_val - wt_min_val)
+
+// Calculate Scale Ratio and Apply to Raw TSI (Zero-Anchored Projection)
+float scale_ratio = wt_range / tsi_range
+float scaled_tsi = raw_tsi * scale_ratio
+float scaled_tsi_sig = raw_tsi_sig * scale_ratio
+float scaled_tsi_sig2 = raw_tsi_sig2 * scale_ratio // NEW Secondary Signal Scaled
+
+plot(showTsi ? scaled_tsi : na, title="TSI Line", color=color.yellow, linewidth=2)
+plot(showTsi ? scaled_tsi_sig : na, title="TSI Signal", color=color.maroon, linewidth=2)
+// plot(showTsi ? scaled_tsi_sig2 : na, title="TSI Secondary Signal (Dotted)", color=color.maroon, linestyle = plot.linestyle_dotted, linewidth=2)
+
+// =========================================================================
+// NEW: HTF 1 TRUE STRENGTH INDEX (TSI)
+// =========================================================================
+
+// Calculate Raw HTF TSI, Signal, and apply dynamic scaling mapped to HTF WaveTrend
+htf_tsi_calc() =>
+    htf_r_tsi = ta.tsi(close, tsiShort, tsiLong) * 100
+    htf_r_tsi_sig = ta.ema(htf_r_tsi, tsiSigLen)
+    
+    // Scale against the HTF WaveTrend
+    [htf_w1, htf_w2] = wt_calc(n1, n2, smoothType)
+    htf_t_max = ta.highest(htf_r_tsi, tsiNormLen)
+    htf_t_min = ta.lowest(htf_r_tsi, tsiNormLen)
+    htf_w_max = ta.highest(htf_w1, tsiNormLen)
+    htf_w_min = ta.lowest(htf_w1, tsiNormLen)
+    
+    htf_t_range = (htf_t_max - htf_t_min) == 0 ? 1 : (htf_t_max - htf_t_min)
+    htf_w_range = (htf_w_max - htf_w_min) == 0 ? 1 : (htf_w_max - htf_w_min)
+    htf_s_ratio = htf_w_range / htf_t_range
+    
+    [htf_r_tsi * htf_s_ratio, htf_r_tsi_sig * htf_s_ratio]
+
+// Request the calculated TSI metrics via lookahead_on using the exact HTF 1 Logic
+[htf_scaled_tsi, htf_scaled_tsi_sig] = request.security(syminfo.tickerid, htf_tf, htf_tsi_calc(), lookahead = barmerge.lookahead_on)
+
+// Plot the Primary Line & Primary Signal mapping identical current timeframe plotting standards
+plot(showHtfTsi ? htf_scaled_tsi : na, title="HTF 1 TSI Line", color=color.yellow, linewidth=4)
+plot(showHtfTsi ? htf_scaled_tsi_sig : na, title="HTF 1 TSI Signal", color=color.white, linestyle=plot.linestyle_dotted, linewidth=3)
+
+// =========================================================================
+// NEW: EXTRA SPECIFIC HTF TSI (5m & 15m on 1m chart, 15m on 5m chart)
+// =========================================================================
+bool is_1m_tf_chart = timeframe.isminutes and timeframe.multiplier == 1
+bool is_5m_tf_chart = timeframe.isminutes and timeframe.multiplier == 5
+
+// --- 5m Specific TSI ---
+bool display_5m_tsi = is_1m_tf_chart and show5mTsiOn1m
+[extra_scaled_tsi_5m, extra_scaled_tsi_sig_5m] = request.security(syminfo.tickerid, "5", htf_tsi_calc(), lookahead = barmerge.lookahead_on)
+
+plot(display_5m_tsi ? extra_scaled_tsi_5m : na, title="Specific 5m HTF TSI Line", color=color.fuchsia, linewidth=2)
+plot(display_5m_tsi ? extra_scaled_tsi_sig_5m : na, title="Specific 5m HTF TSI Signal", color=color.purple, linestyle=plot.linestyle_dotted, linewidth=2)
+
+// --- 15m Specific TSI ---
+bool display_15m_tsi = (is_1m_tf_chart and show15mTsiOn1m) or (is_5m_tf_chart and show15mTsiOn5m)
+[extra_scaled_tsi_15m, extra_scaled_tsi_sig_15m] = request.security(syminfo.tickerid, "15", htf_tsi_calc(), lookahead = barmerge.lookahead_on)
+
+plot(display_15m_tsi ? extra_scaled_tsi_15m : na, title="Specific 15m HTF TSI Line", color=color.orange, linewidth=2)
+plot(display_15m_tsi ? extra_scaled_tsi_sig_15m : na, title="Specific 15m HTF TSI Signal", color=color.maroon, linestyle=plot.linestyle_dotted, linewidth=2)
+
+// =========================================================================
+// NEW: HTF TSI FILTER LOGIC (2x TSI WaveTrend) + 1-MINUTE FILTER
+// =========================================================================
+filterVisAlerts = input.bool(true, title="Filter Signals & Alerts by HTF TSI", group="TSI Settings", tooltip="When enabled, only Bullish signals plot/alert when HTF 1 TSI > Signal, and Bearish when HTF 1 TSI < Signal.")
+
+bool htf_tsi_bull = htf_scaled_tsi > htf_scaled_tsi_sig
+bool htf_tsi_bear = htf_scaled_tsi < htf_scaled_tsi_sig
+
+// Zero-Line condition (applies strictly to the 1-minute timeframe only)
+bool tf1m_bull_cond = not is_1m_tf_chart or (wt1 < 15)
+bool tf1m_bear_cond = not is_1m_tf_chart or (wt1 > -15)
+
+// Final allowance applies both the HTF TSI filter and the 1-minute zero-line rules
+bool allow_bull = (not filterVisAlerts or htf_tsi_bull) and tf1m_bull_cond
+bool allow_bear = (not filterVisAlerts or htf_tsi_bear) and tf1m_bear_cond
+
+// =========================================================================
+// BB / SS (WT & SECONDARY TSI SIGNAL CROSS)
+// =========================================================================
+
+bool is_3m_or_below = timeframe.isseconds or (timeframe.isminutes and timeframe.multiplier <= 3)
+
+bool raw_is_bb = ta.crossover(wt1, scaled_tsi_sig2)
+bool raw_is_ss = ta.crossunder(wt1, scaled_tsi_sig2)
+
+bool is_bb = raw_is_bb and (not is_3m_or_below or (htf_wt1 > htf_wt2))
+bool is_ss = raw_is_ss and (not is_3m_or_below or (htf_wt1 < htf_wt2))
+
+// =========================================================================
+// NEW: TB & TS LOGIC (WT Cross + HTF TSI Confluence)
+// =========================================================================
+
+bool is_tb = htf_tsi_bull and cross_bull and (wt1 < tbThreshold)
+bool is_ts = htf_tsi_bear and cross_bear and (wt1 > tsThreshold)
+
+// --- Signal Circles (aqua / Orange) ---
+bool valid_cross_bull = cross_bull and allow_bull
+bool valid_cross_bear = cross_bear and allow_bear
+bool valid_cross_any  = valid_cross_bull or valid_cross_bear
+
+plot(valid_cross_any and not showRibbon ? wt2 : na, color=(valid_cross_bear ? color.orange : color.aqua), style=plot.style_circles, linewidth=2, title="Cross Fill")
+
+// --- Toggled Visuals: Labels ---
+// Explicit Text Labels mapped to the Sub-Pane (with SYNC & B2/S2 filtering integration)
+plotshape(showLabels and is_normal_b and allow_bull and not override_sync and not is_b2 ? wt2 : na, title="Sub-Pane Bullish Label", text="B", style=shape.labelup, location=location.absolute, color=color.lime, textcolor=color.black, size=size.tiny)
+plotshape(showLabels and print_2xb and allow_bull and not override_sync and not is_b2 ? wt2 : na, title="Sub-Pane 2x Bullish Label", text="2XB", style=shape.labelup, location=location.absolute, color=color.lime, textcolor=color.black, size=size.tiny)
+plotshape(showLabels and print_4xb and allow_bull and not override_sync and not is_b2 ? wt2 : na, title="Sub-Pane 4x Bullish Label", text="4XB", style=shape.labelup, location=location.absolute, color=color.lime, textcolor=color.black, size=size.tiny)
+
+//plotshape(showLabels and is_dollar_2xb and allow_bull and not override_sync and not is_b2 ? wt2 : na, title="Sub-Pane $2X Bullish Label", text="$2XB", style=shape.labelup, location=location.absolute, color=color.lime, textcolor=color.black, size=size.tiny)
+//plotshape(showLabels and is_dollar_4xb and allow_bull and not override_sync and not is_b2 ? wt2 : na, title="Sub-Pane $4X Bullish Label", text="$4XB", style=shape.labelup, location=location.absolute, color=color.lime, textcolor=color.black, size=size.tiny)
+
+plotshape(showLabels and is_normal_s and allow_bear and not override_sync and not is_s2 ? wt2 : na, title="Sub-Pane Bearish Label", text="S", style=shape.labeldown, location=location.absolute, color=color.orange, textcolor=color.black, size=size.tiny)
+plotshape(showLabels and print_2xs and allow_bear and not override_sync and not is_s2 ? wt2 : na, title="Sub-Pane 2x Bearish Label", text="2XS", style=shape.labeldown, location=location.absolute, color=color.orange, textcolor=color.black, size=size.tiny)
+plotshape(showLabels and print_4xs and allow_bear and not override_sync and not is_s2 ? wt2 : na, title="Sub-Pane 4x Bearish Label", text="4XS", style=shape.labeldown, location=location.absolute, color=color.orange, textcolor=color.black, size=size.tiny)
+
+plotshape(showLabels and is_dollar_2xs and allow_bear and not override_sync and not is_s2 ? wt2 : na, title="Sub-Pane $2X Bearish Label", text="$2XS", style=shape.labeldown, location=location.absolute, color=color.orange, textcolor=color.black, size=size.tiny)
+plotshape(showLabels and is_dollar_4xs and allow_bear and not override_sync and not is_s2 ? wt2 : na, title="Sub-Pane $4X Bearish Label", text="$4XS", style=shape.labeldown, location=location.absolute, color=color.orange, textcolor=color.black, size=size.tiny)
+
+// HTF Cross Labels mapped to the Sub-Pane (Plots directly on the HTF line coordinates)
+plotshape(showLabels and htf_is_regular_b and allow_bull and not override_sync and not is_b2 ? htf_wt2 : na, title="Sub-Pane HTF Bullish Label", text="HB", style=shape.labelup, location=location.absolute, color=color.lime, textcolor=color.black, size=size.tiny)
+// plotshape(showLabels and htf_is_filtered_b and allow_bull and not override_sync and not is_b2 ? htf_wt2 : na, title="Sub-Pane HTF $HB Label", text="$HB", style=shape.labelup, location=location.absolute, color=color.lime, textcolor=color.black, size=size.tiny)
+// plotshape(showLabels and htf_is_2xb and allow_bull and not override_sync and not is_b2 ? htf_wt2 : na, title="Sub-Pane HTF 2x Bullish Label", text="H2XB", style=shape.labelup, location=location.absolute, color=color.lime, textcolor=color.black, size=size.tiny)
+
+plotshape(showLabels and htf_is_regular_s and allow_bear and not override_sync and not is_s2 ? htf_wt2 : na, title="Sub-Pane HTF Bearish Label", text="HS", style=shape.labeldown, location=location.absolute, color=color.orange, textcolor=color.black, size=size.tiny)
+// plotshape(showLabels and htf_is_filtered_s and allow_bear and not override_sync and not is_s2 ? htf_wt2 : na, title="Sub-Pane HTF $HS Label", text="$HS", style=shape.labeldown, location=location.absolute, color=color.orange, textcolor=color.black, size=size.tiny)
+// plotshape(showLabels and htf_is_2xs and allow_bear and not override_sync and not is_s2 ? htf_wt2 : na, title="Sub-Pane HTF 2x Bearish Label", text="H2XS", style=shape.labeldown, location=location.absolute, color=color.orange, textcolor=color.black, size=size.tiny)
+
+// --- OVERRIDING +B2 / +S2 / +B3 / +S3 LABELS ---
+plotshape(showLabels and is_b2 and allow_bull and not is_b3 ? wt2 : na, title="+B2 Label", text="+B2", style=shape.labelup, location=location.absolute, color=color.lime, textcolor=color.black, size=size.tiny)
+plotshape(showLabels and is_b3 and allow_bull ? wt2 : na, title="+B3 Label", text="+B3", style=shape.labelup, location=location.absolute, color=color.lime, textcolor=color.black, size=size.tiny)
+
+plotshape(showLabels and is_s2 and allow_bear and not is_s3 ? wt2 : na, title="+S2 Label", text="+S2", style=shape.labeldown, location=location.absolute, color=color.orange, textcolor=color.black, size=size.tiny)
+plotshape(showLabels and is_s3 and allow_bear ? wt2 : na, title="+S3 Label", text="+S3", style=shape.labeldown, location=location.absolute, color=color.orange, textcolor=color.black, size=size.tiny)
+
+// --- OVERRIDING SYNC LABELS ---
+plotshape(showLabels and is_sync_bull and allow_bull ? wt2 : na, title="Sync Bullish Label", text="SYNC", style=shape.labelup, location=location.absolute, color=color.blue, textcolor=color.white, size=size.tiny)
+plotshape(showLabels and is_sync_bear and allow_bear ? wt2 : na, title="Sync Bearish Label", text="SYNC", style=shape.labeldown, location=location.absolute, color=color.purple, textcolor=color.white, size=size.tiny)
+
+// --- HIGH PROBABILITY SETUP LABELS (H-UP / H-DN) ---
+plotshape(showLabels and is_h_up and allow_bull ? wt2 : na, title="H-UP Label", text="H-UP", style=shape.labelup, location=location.absolute, color=color.lime, textcolor=color.black, size=size.tiny)
+plotshape(showLabels and is_h_dn and allow_bear ? wt2 : na, title="H-DN Label", text="H-DN", style=shape.labeldown, location=location.absolute, color=color.orange, textcolor=color.black, size=size.tiny)
+
+// --- NEW: TB / TS LABELS ---
+plotshape(showLabels and is_tb ? wt2 : na, title="TB Signal", text="TB", style=shape.labelup, location=location.absolute, color=color.lime, textcolor=color.black, size=size.tiny)
+plotshape(showLabels and is_ts ? wt2 : na, title="TS Signal", text="TS", style=shape.labeldown, location=location.absolute, color=color.orange, textcolor=color.black, size=size.tiny)
+
+// --- POI (POINT OF INTEREST) LABELS ---
+float poi_bull_y = htf1_poi_bull ? htf_wt2 : (htf2_poi_bull ? hhtf_wt2 : na)
+float poi_bear_y = htf1_poi_bear ? htf_wt2 : (htf2_poi_bear ? hhtf_wt2 : na)
+
+// plotshape(showLabels and is_poi_bull and allow_bull ? poi_bull_y : na, title="POI Bullish (Reversal)", text="POI", style=shape.labelup, location=location.absolute, color=color.lime, textcolor=color.black, size=size.small)
+// plotshape(showLabels and is_poi_bear and allow_bear ? poi_bear_y : na, title="POI Bearish (Reversal)", text="POI", style=shape.labeldown, location=location.absolute, color=color.red, textcolor=color.white, size=size.small)
+
+// Explicit Text Labels mapped to the Sub-Pane for BB & SS signals
+// plotshape(showLabels and is_bb and allow_bull ? wt1 : na, title="BB Signal", text="BB", style=shape.labelup, location=location.absolute, color=color.rgb(0, 150, 255), textcolor=color.white, size=size.tiny)
+// plotshape(showLabels and is_ss and allow_bear ? wt1 : na, title="SS Signal", text="SS", style=shape.labeldown, location=location.absolute, color=color.rgb(255, 0, 150), textcolor=color.white, size=size.tiny)
+
+// --- Plotting Higher Timeframe 1 ---
+// Hides line from pane when Ribbon is active, updates scale colors, limits width to 1
+disp_htf1 = showHtf1 ? (showRibbon ? (display.price_scale + display.data_window) : display.all) : display.none
+p_htf_wt1 = plot(showHtf1 ? htf_wt1 : na, color=showRibbon ? (htf_wt1 > htf_wt2 ? color.aqua : color.red) : color.green, linewidth=1, title="HTF 1 WT1", display=disp_htf1)
+p_htf_wt2 = plot(showHtf1 ? htf_wt2 : na, color=showRibbon ? (htf_wt1 > htf_wt2 ? color.aqua : color.red) : color.red,   linewidth=1, title="HTF 1 WT2", display=disp_htf1)
+
+// --- Ribbon Fill Higher Timeframe 1 (With Minimum Thickness Fix) ---
+float htf_min_gap = 2.0 // Minimum gap to prevent ribbon from vanishing 
+float htf_dist = math.abs(htf_wt1 - htf_wt2)
+float htf_mid = (htf_wt1 + htf_wt2) / 2
+
+float fill_htf_wt1 = htf_wt1
+float fill_htf_wt2 = htf_wt2
+
+if htf_dist < htf_min_gap
+    if htf_wt1 >= htf_wt2
+        fill_htf_wt1 := htf_mid + (htf_min_gap / 2)
+        fill_htf_wt2 := htf_mid - (htf_min_gap / 2)
+    else
+        fill_htf_wt1 := htf_mid - (htf_min_gap / 2)
+        fill_htf_wt2 := htf_mid + (htf_min_gap / 2)
+
+// Invisible plots exclusively to anchor the Fill
+p_fill_htf_wt1 = plot(showRibbon and showHtf1 ? fill_htf_wt1 : na, color=na, display=display.none, editable=false)
+p_fill_htf_wt2 = plot(showRibbon and showHtf1 ? fill_htf_wt2 : na, color=na, display=display.none, editable=false)
+
+fill(p_fill_htf_wt1, p_fill_htf_wt2, color=(showRibbon and showHtf1) ? (htf_wt1 > htf_wt2 ? color.new(color.aqua, 40) : color.new(color.red, 50)) : na, title="HTF 1 Ribbon Fill")
+
+// --- Plotting Higher Timeframe 2 ---
+// Hides line from pane when Ribbon is active, updates scale colors, limits width to 1
+disp_htf2 = showHtf2 ? (showRibbon ? (display.price_scale + display.data_window) : display.all) : display.none
+p_hhtf_wt1 = plot(showHtf2 ? hhtf_wt1 : na, color=showRibbon ? (hhtf_wt1 > hhtf_wt2 ? color.aqua : color.red) : color.green, linewidth=1, title="HTF 2 WT1", display=disp_htf2)
+p_hhtf_wt2 = plot(showHtf2 ? hhtf_wt2 : na, color=showRibbon ? (hhtf_wt1 > hhtf_wt2 ? color.aqua : color.red) : color.red,   linewidth=1, title="HTF 2 WT2", display=disp_htf2)
+
+// --- Ribbon Fill Higher Timeframe 2 (With Minimum Thickness Fix) ---
+float hhtf_min_gap = 2.0 // Minimum gap to prevent ribbon from vanishing 
+float hhtf_dist = math.abs(hhtf_wt1 - hhtf_wt2)
+float hhtf_mid = (hhtf_wt1 + hhtf_wt2) / 2
+
+float fill_hhtf_wt1 = hhtf_wt1
+float fill_hhtf_wt2 = hhtf_wt2
+
+if hhtf_dist < hhtf_min_gap
+    if hhtf_wt1 >= hhtf_wt2
+        fill_hhtf_wt1 := hhtf_mid + (hhtf_min_gap / 2)
+        fill_hhtf_wt2 := hhtf_mid - (hhtf_min_gap / 2)
+    else
+        fill_hhtf_wt1 := hhtf_mid - (hhtf_min_gap / 2)
+        fill_hhtf_wt2 := hhtf_mid + (hhtf_min_gap / 2)
+
+// Invisible plots exclusively to anchor the Fill
+p_fill_hhtf_wt1 = plot(showRibbon and showHtf2 ? fill_hhtf_wt1 : na, color=na, display=display.none, editable=false)
+p_fill_hhtf_wt2 = plot(showRibbon and showHtf2 ? fill_hhtf_wt2 : na, color=na, display=display.none, editable=false)
+
+fill(p_fill_hhtf_wt1, p_fill_hhtf_wt2, color=(showRibbon and showHtf2) ? (hhtf_wt1 > hhtf_wt2 ? color.new(color.aqua, 40) : color.new(color.red, 50)) : na, title="HTF 2 Ribbon Fill")
+
+// =========================================================================
+// NEW: BACKGROUND OVERLAY HTF TSI (Imported specifically for PXT Alert)
+// =========================================================================
+tsiAmp = input.float(1.0, title="TSI Height Multiplier (Background)", group="TSI Settings", tooltip="Used exclusively for calculating the background PXT crossover logic.")
+
+wt_calc_bg(chanLen, avgLen, sType) =>
+    ap_bg = hlc3
+    esa_bg = ta.ema(ap_bg, chanLen)
+    d_bg = ta.ema(math.abs(ap_bg - esa_bg), chanLen)
+    ci_bg = (ap_bg - esa_bg) / (0.015 * d_bg)
+    wt1_bg = sType == "ALMA" ? ta.alma(ci_bg, avgLen, 0.85, 6) : ta.ema(ci_bg, avgLen)
+    [wt1_bg, esa_bg, d_bg]
+
+f_wt_combined_bg(chanLen, avgLen, sType) =>
+    [w1_bg, e_bg, d_val_bg] = wt_calc_bg(chanLen, avgLen, sType)
+    [w1_bg, e_bg, d_val_bg]
+
+[htf_wt1_bg, htf_esa_bg, htf_d_bg] = request.security(syminfo.tickerid, htf_tf, f_wt_combined_bg(n1, n2, smoothType), lookahead = barmerge.lookahead_on)
+
+htf_tsi_calc_bg() =>
+    htf_r_tsi = ta.tsi(close, tsiShort, tsiLong) * 100
+    htf_r_tsi_sig = ta.ema(htf_r_tsi, tsiSigLen)
+    [htf_r_tsi, htf_r_tsi_sig]
+
+[htf_raw_tsi_bg, htf_raw_tsi_sig_bg] = request.security(syminfo.tickerid, htf_tf, htf_tsi_calc_bg(), lookahead = barmerge.lookahead_on)
+
+htf_t_max_bg = ta.highest(htf_raw_tsi_bg, tsiNormLen)
+htf_t_min_bg = ta.lowest(htf_raw_tsi_bg, tsiNormLen)
+htf_w_max_bg = ta.highest(htf_wt1_bg, tsiNormLen)
+htf_w_min_bg = ta.lowest(htf_wt1_bg, tsiNormLen)
+
+htf_t_range_bg = math.max(htf_t_max_bg - htf_t_min_bg, 0.0001)
+htf_w_range_bg = math.max(htf_w_max_bg - htf_w_min_bg, 0.0001)
+htf_s_ratio_bg = (htf_w_range_bg / htf_t_range_bg) * tsiAmp
+
+project_bg(val, _esa, _d) => _esa + (val * 0.015 * _d)
+
+htf_overlay_tsi_bg = project_bg(htf_raw_tsi_bg * htf_s_ratio_bg, htf_esa_bg, htf_d_bg)
+
+// PXT ALERTS LOGIC (Price Crossing the Background HTF TSI Overlay)
+is_pxt = ta.cross(close, htf_overlay_tsi_bg)
+
+
+// =========================================================================
+// ALERTS (100% PARITY WITH OVERLAY INDICATOR - FILTERED BY HTF TSI)
+// =========================================================================
+
+// --- NEW: HTF 1 TSI CROSS PLOTSHAPES ("GC") ---
+bool htf1_tsi_cross_up = ta.crossover(htf_scaled_tsi, htf_scaled_tsi_sig)
+bool htf1_tsi_cross_dn = ta.crossunder(htf_scaled_tsi, htf_scaled_tsi_sig)
+
+// *** NEW MASTER COMMON ALERT (FIRST IN DROPDOWN) ***
+alertcondition(is_tb or is_ts or htf1_tsi_cross_up or htf1_tsi_cross_dn or is_pxt, title="Common: TB / TS OR X TSI HTF OR PXT", message="TB / TS OR X TSI HTF OR PXT Signal Detected")
+
+// *** NEW STANDALONE PXT ALERT ***
+alertcondition(is_pxt, title="PXT: Price Cross TSI HTF Overlay", message="PXT: Current price crossed the HTF TSI Overlay")
+
+// PLOTSHAPES 
+plotshape(showLabels and htf1_tsi_cross_up ? htf_scaled_tsi_sig : na, title="HTF 1 TSI Cross Up Label", text="X TSI", style=shape.labelup, location=location.absolute, color=color.yellow, textcolor=color.black, size=size.tiny)
+plotshape(showLabels and htf1_tsi_cross_dn ? htf_scaled_tsi_sig : na, title="HTF 1 TSI Cross Down Label", text="X TSI", style=shape.labeldown, location=location.absolute, color=color.fuchsia, textcolor=color.white, size=size.tiny)
+
+// --- NEW PXT PLOTSHAPE ---
+plotshape(showLabels and is_pxt ? htf_scaled_tsi : na, title="PXT Label", style=shape.circle, location=location.absolute, color=color.white, textcolor=color.black, size=size.tiny)
+
+// --- NEW MERGED COMMON ALERT: TB / TS & HIGH PROBABILITY SETUP (FIRST ALERT) ---
+alertcondition(is_tb or is_ts or htf1_tsi_cross_up or htf1_tsi_cross_dn, title="Common: TB / TS OR X TSI HTF", message="TB / TS OR X TSI - HTF")
+// alertcondition((is_h_up and allow_bull) or (is_h_dn and allow_bear), title=" High Probability", message="High Probability Setup Detected")
+
+// NEW COMMON ALERT: TB / TS
+alertcondition(is_tb or is_ts, title="Common: TB / TS Alert", message="TB or TS Signal Triggered (WT Cross with HTF TSI Confluence)")
+
+// --- NEW ALERT: HTF 1 TSI CROSS ---
+alertcondition(htf1_tsi_cross_up or htf1_tsi_cross_dn or (is_sync_bull and allow_bull) or (is_sync_bear and allow_bear), title="High Prb / HTF 1 TSI Cross (Common)", message="Hi-Probability / HTF 1 TSI crossed its Signal Line (Upward or Downward)")
+
+bool is_dollar_alignment = ((is_dollar_2xb or is_dollar_4xb) and allow_bull) or ((is_dollar_2xs or is_dollar_4xs) and allow_bear)
+
+// Standalone BB / SS Alert
+//alertcondition((is_bb and allow_bull) or (is_ss and allow_bear), title="BB / SS (WT & TSI2 Cross)", message="CTF WaveTrend crossed the Secondary TSI Signal Line (BB or SS Triggered)")
+
+// NEW ALERT: HIGH PROBABILITY SETUP (H-UP / H-DN)
+alertcondition((is_h_up and allow_bull) or (is_h_dn and allow_bear), title="High probability setup", message="High Probability Setup Detected (H-UP / H-DN)")
+
+// NEW ALERT 3: EXCLUSIVE DEDICATED SYNC LEVEL FILTER ALERT
+alertcondition((is_sync_bull and allow_bull) or (is_sync_bear and allow_bear), title="Filtered SYNC (by WT Level)", message="Filtered SYNC (WT Level) Alignment Detected")
+
+// --- NEW: SESSION SCANNERS (TODAY & PREVIOUS DAY) ---
+bool is_new_day = ta.change(time("D")) != 0
+
+var bool sync_today = false
+var bool sync_yesterday = false
+
+if is_new_day
+    sync_yesterday := sync_today[1]
+    sync_today := false
+
+if (is_sync_bull and allow_bull) or (is_sync_bear and allow_bear)
+    sync_today := true
+
+// alertcondition(sync_today, title="Today Scanner", message="Filtered SYNC (WT Level) Alignment Detected Today")
+// alertcondition(sync_yesterday, title="Previous Day Scanner", message="Filtered SYNC (WT Level) Alignment Detected Previous Day")
+
+// --- NEW COMBINED +B2 / +B3 & +S2 / +S3 ALERT (Placed First in the Dropdown - Updated with POI) ---
+bool alert_common_b2 = (is_b2 and allow_bull) or (is_s2 and allow_bear) or (is_poi_bull and allow_bull) or (is_poi_bear and allow_bear) or (is_h_up and allow_bull) or (is_h_dn and allow_bear)
+// alertcondition(alert_common_b2, title="Common: +B2 / +S2 / +B3 / +S3 Alert", message="+B2, +S2, +B3, +S3, or POI Alignment Detected")
+
+// --- Common: $HB $HS / +B2 +S2 +B3 +S3 Alert (Updated with POI) ---
+bool is_hb_hs_b_s = (htf_is_filtered_b and allow_bull) or (htf_is_filtered_s and allow_bear) or (is_b2 and allow_bull) or (is_s2 and allow_bear) or (is_poi_bull and allow_bull) or (is_poi_bear and allow_bear) or (is_h_up and allow_bull) or (is_h_dn and allow_bear)
+// alertcondition(is_hb_hs_b_s, title="Common: $HB $HS / +B2 +S2 +B3 +S3", message="$HB, $HS, +B2, +S2, +B3, +S3, or POI Alert Triggered")
+
+// --- New Cross & Alignment Alerts ---
+
+// NEW ALERT 1: SYNC OR $HB/$HS OR +B2/+S2/+B3/+S3
+bool a1_bull = (is_sync_bull or htf_is_filtered_b or is_b2 or is_h_up) and allow_bull
+bool a1_bear = (is_sync_bear or htf_is_filtered_s or is_s2 or is_h_dn) and allow_bear
+// alertcondition(a1_bull or a1_bear, title="Common: SYNC / $HB $HS / +B2 +S2 +B3 +S3", message="Alert: SYNC Alignment, $HB/$HS Filtered Cross, OR +B2/+S2/+B3/+S3 Detected")
+
+// NEW ALERT 2: SYNC OR +B2/+S2/+B3/+S3
+bool a2_bull = (is_sync_bull or is_b2 or is_h_up) and allow_bull
+bool a2_bear = (is_sync_bear or is_s2 or is_h_dn) and allow_bear
+// alertcondition(a2_bull or a2_bear, title="Common: SYNC / +B2 +S2 +B3 +S3", message="Alert: SYNC Alignment OR +B2/+S2/+B3/+S3 Detected")
+
+bool a3_bull = htf_is_filtered_b and allow_bull
+bool a3_bear = htf_is_filtered_s and allow_bear
+// alertcondition(a3_bull or a3_bear or is_dollar_alignment, title="Filtered HTF WT Cross ($HB/$HS)", message="Filtered Higher Timeframe WaveTrend Cross OR $2X/$4X Detected")
+
+// MERGED 2x & 4x ALERTS (FROM PREVIOUS SEPARATE ALERTS)
+bool a4_bull = (htf_is_2xb or is_4xb) and allow_bull
+bool a4_bear = (htf_is_2xs or is_4xs) and allow_bear
+// alertcondition(a4_bull or a4_bear, title="HTF 2x / CTF 4x Alignment (H2X/4X)", message="Higher Timeframe 2x or Lower Timeframe 4x WaveTrend Cross Detected")

@@ -109,59 +109,67 @@ async function callMcpTool<T = any>(
   retry = true
 ): Promise<T> {
   const state = sessions[url];
-  const sessionId = await ensureSession(url, false);
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json, text/event-stream',
-  };
-  if (sessionId) {
-    headers['mcp-session-id'] = sessionId;
-  }
+  try {
+    const sessionId = await ensureSession(url, false);
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      Accept: 'application/json, text/event-stream',
+    };
+    if (sessionId) {
+      headers['mcp-session-id'] = sessionId;
+    }
 
-  const res = await fetchWithTimeout(url, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({
-      jsonrpc: '2.0',
-      id: state.reqId++,
-      method: 'tools/call',
-      params: {
-        name: toolName,
-        arguments: args,
-      },
-    }),
-  });
+    const res = await fetchWithTimeout(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: state.reqId++,
+        method: 'tools/call',
+        params: {
+          name: toolName,
+          arguments: args,
+        },
+      }),
+    });
 
-  if ((res.status === 400 || res.status === 404 || res.status === 410) && retry) {
-    state.sessionId = null;
-    await ensureSession(url, true);
-    return callMcpTool<T>(url, toolName, args, false);
-  }
-
-  const parsed = await parseMcpHttpResponse(res);
-  if (parsed?.error) {
-    if (retry && /session/i.test(String(parsed.error.message || ''))) {
+    if ((res.status === 400 || res.status === 404 || res.status === 410 || res.status >= 500) && retry) {
       state.sessionId = null;
       await ensureSession(url, true);
       return callMcpTool<T>(url, toolName, args, false);
     }
-    throw new Error(`NSE MCP ${toolName} error: ${parsed.error.message || 'Unknown error'}`);
-  }
 
-  const textContent = parsed?.result?.content?.[0]?.text;
-  if (typeof textContent !== 'string') {
-    return parsed?.result as T;
-  }
-
-  try {
-    return JSON.parse(textContent) as T;
-  } catch {
-    // Some tools like moving_average return a plain numeric string
-    const asNum = Number(textContent.trim());
-    if (!Number.isNaN(asNum)) {
-      return asNum as unknown as T;
+    const parsed = await parseMcpHttpResponse(res);
+    if (parsed?.error) {
+      if (retry) {
+        state.sessionId = null;
+        await ensureSession(url, true);
+        return callMcpTool<T>(url, toolName, args, false);
+      }
+      throw new Error(`NSE MCP ${toolName} error: ${parsed.error.message || 'Unknown error'}`);
     }
-    return textContent as unknown as T;
+
+    const textContent = parsed?.result?.content?.[0]?.text;
+    if (typeof textContent !== 'string') {
+      return parsed?.result as T;
+    }
+
+    try {
+      return JSON.parse(textContent) as T;
+    } catch {
+      const asNum = Number(textContent.trim());
+      if (!Number.isNaN(asNum)) {
+        return asNum as unknown as T;
+      }
+      return textContent as unknown as T;
+    }
+  } catch (err) {
+    if (retry) {
+      state.sessionId = null;
+      await ensureSession(url, true).catch(() => null);
+      return callMcpTool<T>(url, toolName, args, false);
+    }
+    throw err;
   }
 }
 

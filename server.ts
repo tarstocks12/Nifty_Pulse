@@ -8,9 +8,13 @@ import {
   searchNseSymbols,
 } from './server/marketService.ts';
 import { sanitizeSymbol } from './server/nseMcp.ts';
+import { getXtsiDashboardData } from './server/xtsiService.ts';
+import type { UniverseFilter } from './src/types/market.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+const ALLOWED_WATCHLISTS = new Set<UniverseFilter>(['all', 'personal', 'fno', 'nifty50', 'nifty500']);
 
 async function startServer() {
   const app = express();
@@ -34,6 +38,23 @@ async function startServer() {
       console.error('[API /dashboard] Error:', err?.message || err);
       res.status(502).json({
         error: 'Unable to fetch live NSE market feeds. Please retry in a moment.',
+      });
+    }
+  });
+
+  // Pine Script v6 X TSI (HTF TSI Cross) multi-timeframe scanner endpoint
+  app.get('/api/xtsi', async (req, res) => {
+    const rawWl = String(req.query.watchlist || 'personal').toLowerCase() as UniverseFilter;
+    const watchlist: UniverseFilter = ALLOWED_WATCHLISTS.has(rawWl) ? rawWl : 'personal';
+    const force = req.query.refresh === '1' || req.query.refresh === 'true';
+    try {
+      const data = await getXtsiDashboardData(watchlist, force);
+      res.setHeader('Cache-Control', 'no-store');
+      res.json(data);
+    } catch (err: any) {
+      console.error('[API /xtsi] Error:', err?.message || err);
+      res.status(502).json({
+        error: 'Unable to compute X TSI signals right now. Please retry.',
       });
     }
   });
@@ -75,9 +96,12 @@ async function startServer() {
     }
   });
 
-  // Warm cache right after startup in background
+  // Warm main NSE MCP cache + Personal Watchlist (143) X TSI cache in background
   getDashboardData(false).catch((err) => {
     console.warn('[Warmup] Initial NSE MCP fetch deferred:', err?.message || err);
+  });
+  getXtsiDashboardData('personal', false).catch((err) => {
+    console.warn('[Warmup] Initial X TSI scan deferred:', err?.message || err);
   });
 
   const isProd = process.env.NODE_ENV === 'production';

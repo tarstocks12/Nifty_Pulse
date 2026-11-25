@@ -15,7 +15,70 @@ export type ScreenerCategoryId =
   | 'penny_fundamentals'
   | 'multibagger';
 
-export type UniverseFilter = 'all' | 'fno' | 'nifty50' | 'nifty500';
+export type UniverseFilter = 'all' | 'personal' | 'fno' | 'nifty50' | 'nifty500';
+
+export type XtsiTimeframe = '5m' | '1H' | '1D';
+
+export type XtsiHtf = '1H' | '1D' | '1W';
+
+export type XtsiFilterOption =
+  | 'All'
+  | 'Regime: Bull'
+  | 'Regime: Bear'
+  | 'Bull & OSC < -25'
+  | 'Bull & OSC < -40'
+  | 'Bull & OSC < 0'
+  | 'Bear & OSC > 0'
+  | 'Bull & OSC > 0 (P2)'
+  | 'Bear & OSC < 0 (P2)';
+
+export interface XtsiTimeframeSignal {
+  ctf: XtsiTimeframe;
+  htf: XtsiHtf;
+  regime: 'BULL' | 'BEAR' | 'NEUTRAL';
+  isBull: boolean;
+  isBear: boolean;
+  freshCross: boolean;
+  ctfBarsSinceCross: number;
+  htfBarsSinceCross: number;
+  crossTimestamp: number;
+  scaledTsi: number;
+  scaledTsiSig: number;
+  rawTsi: number;
+  rawTsiSig: number;
+  ctfWt1: number;
+  ctfWt2: number;
+  isTb: boolean;
+  isTs: boolean;
+  isPxt: boolean;
+  unavailable?: boolean;
+}
+
+export interface XtsiSymbolRow {
+  symbol: string;
+  name: string;
+  sector: string;
+  ltp: number;
+  perChange: number;
+  isPersonal: boolean;
+  isFnO: boolean;
+  isNifty50: boolean;
+  isNifty500: boolean;
+  tsiStrength: number;
+  tsiStrengthLabel: 'STRONG BULL' | 'BULL' | 'NEUTRAL' | 'BEAR' | 'STRONG BEAR';
+  hasFreshXtsi: boolean;
+  minCtfBars: number;
+  timeframes: Record<XtsiTimeframe, XtsiTimeframeSignal>;
+}
+
+export interface XtsiDashboardPayload {
+  watchlist: UniverseFilter;
+  updatedAt: string;
+  totalSymbols: number;
+  scannedCount: number;
+  scanning: boolean;
+  rows: XtsiSymbolRow[];
+}
 
 export type CapTier = 'Large Cap' | 'Mid Cap' | 'Small Cap';
 
@@ -107,6 +170,7 @@ export interface StockRecord {
   sector: string;
   capTier: CapTier;
   isFnO: boolean;
+  isPersonal?: boolean;
   isNifty50: boolean;
   isNifty500: boolean;
   ltp: number;

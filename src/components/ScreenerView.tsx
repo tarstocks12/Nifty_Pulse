@@ -20,7 +20,6 @@ import { SymbolLink } from './SymbolLink';
 interface ScreenerViewProps {
   mode: 'technical' | 'thematic';
   stocks: StockRecord[];
-  categoryCounts: Record<ScreenerCategoryId, number>;
   activeCategory: ScreenerCategoryId;
   onCategoryChange: (cat: ScreenerCategoryId) => void;
   universeFilter: UniverseFilter;
@@ -41,7 +40,6 @@ type SortKey =
 export function ScreenerView({
   mode,
   stocks,
-  categoryCounts,
   activeCategory,
   onCategoryChange,
   universeFilter,
@@ -67,23 +65,53 @@ export function ScreenerView({
 
   const activeDef = SCREENER_BY_ID.get(effectiveCategory) || tabs[0];
 
+  // Scope first by Universe + Sector + Search so tab badge counts ALWAYS match the visible table rows 100%
+  const universeScopedStocks = useMemo(() => {
+    return stocks.filter((s) => {
+      if (universeFilter === 'personal' && !s.isPersonal) return false;
+      if (universeFilter === 'fno' && !s.isFnO) return false;
+      if (universeFilter === 'nifty50' && !s.isNifty50) return false;
+      if (universeFilter === 'nifty500' && !s.isNifty500) return false;
+      return true;
+    });
+  }, [stocks, universeFilter]);
+
   const sectors = useMemo(() => {
-    const set = new Set(stocks.map((s) => s.sector));
+    const set = new Set(universeScopedStocks.map((s) => s.sector));
     return ['ALL', ...Array.from(set).sort()];
-  }, [stocks]);
+  }, [universeScopedStocks]);
+
+  const preCategoryStocks = useMemo(() => {
+    const q = tableQuery.trim().toUpperCase();
+    return universeScopedStocks.filter((s) => {
+      if (sectorFilter !== 'ALL' && s.sector !== sectorFilter) return false;
+      if (
+        q &&
+        !s.symbol.includes(q) &&
+        !s.name.toUpperCase().includes(q) &&
+        !s.sector.toUpperCase().includes(q)
+      ) {
+        return false;
+      }
+      return true;
+    });
+  }, [universeScopedStocks, sectorFilter, tableQuery]);
+
+  // Exact live counts synchronized with the visible filtered rows below
+  const scopedCategoryCounts = useMemo(() => {
+    const counts: Record<string, number> = { all: preCategoryStocks.length };
+    for (const s of preCategoryStocks) {
+      for (const sig of s.signals) {
+        counts[sig.id] = (counts[sig.id] || 0) + 1;
+      }
+    }
+    return counts;
+  }, [preCategoryStocks]);
 
   const filtered = useMemo(() => {
-    const q = tableQuery.trim().toUpperCase();
-    return stocks
+    return preCategoryStocks
       .filter((s) => {
-        if (universeFilter === 'fno' && !s.isFnO) return false;
-        if (universeFilter === 'nifty50' && !s.isNifty50) return false;
-        if (universeFilter === 'nifty500' && !s.isNifty500) return false;
-        if (sectorFilter !== 'ALL' && s.sector !== sectorFilter) return false;
         if (effectiveCategory !== 'all' && !s.signals.some((sig) => sig.id === effectiveCategory)) {
-          return false;
-        }
-        if (q && !s.symbol.includes(q) && !s.name.toUpperCase().includes(q) && !s.sector.toUpperCase().includes(q)) {
           return false;
         }
         return true;
@@ -131,7 +159,7 @@ export function ScreenerView({
         }
         return sortDir === 'desc' ? vb - va : va - vb;
       });
-  }, [stocks, universeFilter, sectorFilter, effectiveCategory, tableQuery, sortKey, sortDir]);
+  }, [preCategoryStocks, effectiveCategory, sortKey, sortDir]);
 
   const toggleSort = (key: SortKey) => {
     if (sortKey === key) {
@@ -206,7 +234,7 @@ export function ScreenerView({
       <div className="flex flex-wrap gap-1.5">
         {tabs.map((tab) => {
           const active = tab.id === effectiveCategory;
-          const count = categoryCounts[tab.id] ?? 0;
+          const count = scopedCategoryCounts[tab.id] ?? 0;
           return (
             <button
               key={tab.id}
